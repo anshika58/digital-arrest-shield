@@ -1,17 +1,44 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-
+from typing import List
+from ai_agent import get_ai_advice
 from database import engine, SessionLocal
 from models import Base, ScamReport
 
+from pathlib import Path
 import json
 
 
 app = FastAPI()
 
 
-# Frontend ko backend API access karne ki permission
+# =====================================================
+# FRONTEND LOCATION
+# =====================================================
+
+FRONTEND_DIR = Path(__file__).resolve().parent / "fronted"
+
+
+# =====================================================
+# NO GOOGLE INDEXING
+# =====================================================
+
+@app.middleware("http")
+async def add_noindex_header(request, call_next):
+
+    response = await call_next(request)
+
+    response.headers["X-Robots-Tag"] = "noindex, nofollow"
+
+    return response
+
+
+# =====================================================
+# CORS
+# =====================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,11 +48,47 @@ app.add_middleware(
 )
 
 
-# Database table create karna
+# =====================================================
+# DATABASE
+# =====================================================
+
 Base.metadata.create_all(bind=engine)
 
 
-# User se milne wali information
+# =====================================================
+# FRONTEND
+# =====================================================
+
+@app.get("/", include_in_schema=False)
+def home():
+
+    return FileResponse(
+        FRONTEND_DIR / "index.html"
+    )
+
+
+@app.get("/style.css", include_in_schema=False)
+def style():
+
+    return FileResponse(
+        FRONTEND_DIR / "style.css",
+        media_type="text/css"
+    )
+
+
+@app.get("/script.js", include_in_schema=False)
+def script():
+
+    return FileResponse(
+        FRONTEND_DIR / "script.js",
+        media_type="application/javascript"
+    )
+
+
+# =====================================================
+# USER INPUT MODEL
+# =====================================================
+
 class ScamInput(BaseModel):
 
     caller_claim: str
@@ -38,16 +101,10 @@ class ScamInput(BaseModel):
     created_urgency: bool
 
 
-# Backend test karne ke liye
-@app.get("/")
-def home():
+# =====================================================
+# DIGITAL ARREST DETECTION
+# =====================================================
 
-    return {
-        "message": "Digital Arrest Backend is Running"
-    }
-
-
-# Digital Arrest information receive karne wali API
 @app.post("/detect-scam")
 def detect_scam(data: ScamInput):
 
@@ -97,7 +154,10 @@ def detect_scam(data: ScamInput):
         red_flags.append("Created urgency or pressure")
 
 
-    # Risk level
+    # =================================================
+    # RISK LEVEL
+    # =================================================
+
     if risk_score >= 60:
 
         risk_level = "HIGH"
@@ -111,11 +171,13 @@ def detect_scam(data: ScamInput):
         risk_level = "LOW"
 
 
-    # Scam detected
     scam_detected = risk_score >= 30
 
 
-    # Safety actions
+    # =================================================
+    # SAFETY ACTIONS
+    # =================================================
+
     safety_actions = [
 
         "Do not transfer money.",
@@ -131,11 +193,13 @@ def detect_scam(data: ScamInput):
     ]
 
 
-    # Database connection
+    # =================================================
+    # DATABASE
+    # =================================================
+
     db = SessionLocal()
 
 
-    # Report create karna
     report = ScamReport(
 
         caller_claim=data.caller_claim,
@@ -163,7 +227,6 @@ def detect_scam(data: ScamInput):
     )
 
 
-    # Database me save
     db.add(report)
 
     db.commit()
@@ -192,7 +255,52 @@ def detect_scam(data: ScamInput):
     }
 
 
-# Saari reports dekhne wali API
+# =====================================================
+# AI ADVICE INPUT
+# =====================================================
+
+class AdviceInput(BaseModel):
+
+    user_question: str = ""
+
+    risk_score: int = 0
+
+    risk_level: str = "LOW"
+
+    red_flags: List[str] = []
+
+
+# =====================================================
+# AI SAFETY ADVICE
+# =====================================================
+
+@app.post("/ai-advice")
+def ai_advice(data: AdviceInput):
+
+    advice = get_ai_advice(
+
+        user_question=data.user_question,
+
+        risk_score=data.risk_score,
+
+        risk_level=data.risk_level,
+
+        red_flags=data.red_flags
+
+    )
+
+
+    return {
+
+        "advice": advice
+
+    }
+
+
+# =====================================================
+# ALL REPORTS
+# =====================================================
+
 @app.get("/reports")
 def get_reports():
 
@@ -246,20 +354,21 @@ def get_reports():
     }
 
 
-# Ek particular report ID se report dekhne wali API
+# =====================================================
+# SINGLE REPORT
+# =====================================================
+
 @app.get("/reports/{report_id}")
 def get_report(report_id: int):
 
     db = SessionLocal()
 
 
-    # Database me ID search karna
     report = db.query(ScamReport).filter(
         ScamReport.id == report_id
     ).first()
 
 
-    # Agar report nahi mili
     if report is None:
 
         db.close()
@@ -270,7 +379,6 @@ def get_report(report_id: int):
         )
 
 
-    # Report mil gayi
     result = {
 
         "report_id": report.id,

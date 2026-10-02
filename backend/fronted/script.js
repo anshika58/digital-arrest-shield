@@ -1,40 +1,48 @@
-// =====================================================
-// DIGITAL ARREST SHIELD
-// =====================================================
+/* =========================================================
+   DIGITAL ARREST SHIELD
+   FINAL SCRIPT.JS
+   ========================================================= */
 
 const BACKEND_URL = "http://127.0.0.1:8000";
 
-console.log("Digital Arrest Shield loaded");
 
-
-// =====================================================
-// HELPER
-// =====================================================
+/* =========================================================
+   COMMON HELPERS
+   ========================================================= */
 
 function escapeHTML(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
 
-    return String(value ?? "")
+    return String(value)
         .replace(/&/g, "&amp;")
         .replace(/</g, "&lt;")
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
-
 }
 
 
 function showBox(box, html) {
-
-    if (!box) return;
-
-    box.style.display = "block";
+    if (!box) {
+        console.error("Result box not found.");
+        return;
+    }
 
     box.innerHTML = html;
+    box.removeAttribute("hidden");
 
+    box.style.setProperty("display", "block", "important");
+    box.style.setProperty("visibility", "visible", "important");
+    box.style.setProperty("opacity", "1", "important");
+    box.style.setProperty("height", "auto", "important");
+    box.style.setProperty("max-height", "none", "important");
 }
 
 
 function riskIcon(level) {
+    level = String(level || "").toUpperCase();
 
     if (level === "HIGH") {
         return "🚨";
@@ -45,1354 +53,1395 @@ function riskIcon(level) {
     }
 
     return "🛡️";
-
 }
 
 
-// =====================================================
-// BACKEND REQUEST
-// =====================================================
+function boolValue(value) {
+    return String(value).toLowerCase() === "true";
+}
+
+
+/* =========================================================
+   BACKEND
+   ========================================================= */
 
 async function sendToBackend(payload) {
+    console.log("Sending payload to backend:", payload);
 
-    const response = await fetch(
-        `${BACKEND_URL}/detect-scam`,
-        {
-            method: "POST",
+    let response;
 
-            headers: {
-                "Content-Type": "application/json"
-            },
+    try {
+        response = await fetch(
+            `${BACKEND_URL}/detect-scam`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(payload)
+            }
+        );
+    } catch (error) {
+        console.error("FETCH ERROR:", error);
 
-            body: JSON.stringify(payload)
-        }
-    );
-
+        throw new Error(
+            "Backend se connection nahi ho pa raha. FastAPI running hai ya nahi check karo."
+        );
+    }
 
     let data;
 
     try {
-
         data = await response.json();
-
-    } catch {
+    } catch (error) {
+        console.error("JSON ERROR:", error);
 
         throw new Error(
-            "Backend returned an invalid response."
+            "Backend ne valid JSON response nahi diya."
         );
-
     }
 
+    console.log("Backend response:", data);
 
     if (!response.ok) {
-
         throw new Error(
             data.detail ||
-            "Backend request failed."
+            data.message ||
+            `Backend Error ${response.status}`
         );
-
     }
 
-
     return data;
-
 }
 
 
-// =====================================================
-// DISPLAY RISK RESULT
-// =====================================================
+/* =========================================================
+   AI ADVICE FORMATTER
+   ========================================================= */
 
-function renderRiskResult(box, data) {
+function formatAdvice(text) {
+    const headings = [
+        "What this means",
+        "Why it is suspicious",
+        "What to do now",
+        "What not to do",
+        "Evidence to save",
+        "Where to report"
+    ];
 
-    const flags =
-        data.red_flags || [];
+    let html = "";
+    let inList = false;
 
-    const actions =
-        data.safety_actions || [];
+    String(text || "").split("\n").forEach(function(raw) {
+        const line = raw.trim().replace(/\*\*/g, "");
+
+        if (!line) {
+            return;
+        }
+
+        const heading = headings.find(function(h) {
+            return line.toLowerCase().startsWith(h.toLowerCase());
+        });
+
+        if (heading) {
+            if (inList) {
+                html += "</ul>";
+                inList = false;
+            }
+
+            html += `<h4>${escapeHTML(heading)}</h4>`;
+
+            const rest = line
+                .slice(heading.length)
+                .replace(/^[:\s-]+/, "");
+
+            if (rest) {
+                html += `<p>${escapeHTML(rest)}</p>`;
+            }
+
+            return;
+        }
+
+        if (/^([-•*]|\d+[.)])\s+/.test(line)) {
+            if (!inList) {
+                html += "<ul>";
+                inList = true;
+            }
+
+            html += `<li>${escapeHTML(
+                line.replace(/^([-•*]|\d+[.)])\s+/, "")
+            )}</li>`;
+
+            return;
+        }
+
+        if (inList) {
+            html += "</ul>";
+            inList = false;
+        }
+
+        html += `<p>${escapeHTML(line)}</p>`;
+    });
+
+    if (inList) {
+        html += "</ul>";
+    }
+
+    return html;
+}
 
 
-    const flagsHTML =
-        flags.length
+/* =========================================================
+   LOAD AI ADVICE
+   ========================================================= */
 
-        ?
+async function loadAIAdvice(box, data, userText) {
+    if (!box) {
+        return;
+    }
 
-        `
-        <ul>
+    const old = box.querySelector(".ai-advice-box");
 
-            ${flags.map(function(flag) {
+    if (old) {
+        old.remove();
+    }
 
-                return `
-                    <li>
-                        🚩 ${escapeHTML(flag)}
-                    </li>
-                `;
+    const aiBox = document.createElement("div");
 
-            }).join("")}
+    aiBox.className = "ai-advice-box";
 
-        </ul>
-        `
-
-        :
-
-        `
-        <p>
-            No specific red flags detected.
+    aiBox.innerHTML = `
+        <h3>🤖 AI Safety Advisor</h3>
+        <p class="ai-loading">
+            AI is preparing advice for you...
         </p>
+    `;
+
+    box.appendChild(aiBox);
+
+    try {
+        const response = await fetch(
+            `${BACKEND_URL}/ai-advice`,
+            {
+                method: "POST",
+
+                headers: {
+                    "Content-Type": "application/json"
+                },
+
+                body: JSON.stringify({
+                    user_question: String(userText || "").slice(0, 1500),
+
+                    risk_score: Number(
+                        data.risk_score ?? 0
+                    ),
+
+                    risk_level: String(
+                        data.risk_level || "LOW"
+                    ),
+
+                    red_flags:
+                        Array.isArray(data.red_flags)
+                            ? data.red_flags
+                            : []
+                })
+            }
+        );
+
+        const result = await response.json();
+
+        if (!response.ok) {
+            throw new Error(
+                result.detail ||
+                "AI request failed"
+            );
+        }
+
+        aiBox.innerHTML = `
+            <h3>🤖 AI Safety Advisor</h3>
+
+            <div class="ai-advice-text">
+                ${formatAdvice(result.advice)}
+            </div>
+
+            <p class="ai-note">
+                AI guidance is for awareness only.
+                For real financial cyber fraud in India, call 1930.
+            </p>
         `;
 
+    } catch (error) {
+        console.error("AI ADVICE ERROR:", error);
 
-    const actionsHTML =
-        actions.length
+        aiBox.innerHTML = `
+            <h3>🤖 AI Safety Advisor</h3>
 
-        ?
+            <p>
+                AI advice is unavailable right now.
+                End the suspicious interaction, do not send money
+                or OTP, and verify the caller independently.
+            </p>
 
-        `
-        <ul>
-
-            ${actions.map(function(action) {
-
-                return `
-                    <li>
-                        🛡️ ${escapeHTML(action)}
-                    </li>
-                `;
-
-            }).join("")}
-
-        </ul>
-        `
-
-        :
-
-        `
-        <p>
-            Verify the interaction independently.
-        </p>
+            <p class="ai-note">
+                For financial cyber fraud in India, call 1930.
+            </p>
         `;
+    }
+}
 
 
-    showBox(
-        box,
+/* =========================================================
+   RENDER RISK RESULT
+   ========================================================= */
 
-        `
+function renderRiskResult(box, data, userText) {
+    if (!box) {
+        return;
+    }
 
-        <h3>
+    const level = String(
+        data.risk_level ||
+        data.riskLevel ||
+        "LOW"
+    ).toUpperCase();
 
-            ${riskIcon(data.risk_level)}
+    const score =
+        data.risk_score ??
+        data.riskScore ??
+        0;
 
-            ${escapeHTML(data.risk_level)}
-            RISK
+    const scamDetected =
+        data.scam_detected ??
+        data.scamDetected ??
+        false;
 
-        </h3>
+    const redFlags =
+        Array.isArray(data.red_flags)
+            ? data.red_flags
+            : [];
 
+    const safetyActions =
+        Array.isArray(data.safety_actions)
+            ? data.safety_actions
+            : [];
 
-        <div class="score">
+    let flagsHTML = "";
 
-            ${escapeHTML(data.risk_score)}/100
+    if (redFlags.length > 0) {
+        flagsHTML = `
+            <div class="result-section">
+                <h3>🚩 Red Flags Detected</h3>
+
+                <ul>
+                    ${redFlags.map(function(flag) {
+                        return `<li>${escapeHTML(flag)}</li>`;
+                    }).join("")}
+                </ul>
+            </div>
+        `;
+    } else {
+        flagsHTML = `
+            <div class="result-section">
+                <h3>🚩 Red Flags</h3>
+
+                <p>
+                    No major red flags detected.
+                </p>
+            </div>
+        `;
+    }
+
+    let actionsHTML = "";
+
+    if (safetyActions.length > 0) {
+        actionsHTML = `
+            <div class="result-section">
+                <h3>🛡️ Safety Actions</h3>
+
+                <ul>
+                    ${safetyActions.map(function(action) {
+                        return `<li>${escapeHTML(action)}</li>`;
+                    }).join("")}
+                </ul>
+            </div>
+        `;
+    }
+
+    const riskClass =
+        level === "HIGH"
+            ? "risk-high"
+            : level === "MEDIUM"
+                ? "risk-medium"
+                : "risk-low";
+
+    const html = `
+        <div class="${riskClass}">
+
+            <h2>
+                ${riskIcon(level)}
+                ${escapeHTML(level)} RISK
+            </h2>
+
+            <div class="score">
+                ${escapeHTML(score)}%
+            </div>
+
+            <p>
+                <strong>Scam Detected:</strong>
+                ${scamDetected ? "Yes" : "No"}
+            </p>
+
+            ${
+                data.report_id !== undefined
+                    ? `
+                        <p>
+                            <strong>Report ID:</strong>
+                            ${escapeHTML(data.report_id)}
+                        </p>
+                    `
+                    : ""
+            }
+
+            ${flagsHTML}
+
+            ${actionsHTML}
 
         </div>
+    `;
 
+    showBox(box, html);
 
-        <p>
+    console.log("FINAL RESULT DISPLAYED:", box);
 
-            Scam detected:
-
-            <strong>
-
-                ${
-                    data.scam_detected
-                        ? "YES"
-                        : "NO"
-                }
-
-            </strong>
-
-        </p>
-
-
-        ${
-            data.report_id !== undefined
-
-            ?
-
-            `
-            <p>
-
-                Report ID:
-
-                <strong>
-                    ${escapeHTML(data.report_id)}
-                </strong>
-
-            </p>
-            `
-
-            :
-
-            ""
-        }
-
-
-        <hr>
-
-
-        <h4>
-            🚩 Red Flags
-        </h4>
-
-        ${flagsHTML}
-
-
-        <hr>
-
-
-        <h4>
-            🛡️ Safety Actions
-        </h4>
-
-        ${actionsHTML}
-
-        `
+    /*
+       AI advice starts after the normal result is displayed.
+    */
+    loadAIAdvice(
+        box,
+        data,
+        userText || ""
     );
-
 }
 
 
-// =====================================================
-// SCAM CHECKER
-// =====================================================
+/* =========================================================
+   MESSAGE / TEXT ANALYSIS
+   ========================================================= */
 
-const optionButtons =
-    document.querySelectorAll(
-        ".question .options button"
+function createTextPayload(text) {
+    const lower = text.toLowerCase();
+
+    return {
+        caller_claim: text,
+
+        threatened_arrest:
+            /arrest|arrested|jail|custody|warrant|case|legal action|fir/i
+                .test(lower),
+
+        demanded_money:
+            /money|payment|pay|transfer|fine|₹|rs\.?|rupees|upi|account/i
+                .test(lower),
+
+        asked_otp_bank:
+            /otp|bank|account number|bank details|upi pin|pin|password|cvv|card/i
+                .test(lower),
+
+        forced_video_call:
+            /video call|video|camera|zoom|skype|stay on call|do not disconnect/i
+                .test(lower),
+
+        asked_install_app:
+            /install|download|apk|app|application|remote access|anydesk/i
+                .test(lower),
+
+        created_urgency:
+            /urgent|immediately|now|quickly|today|within.*hour|don't disconnect|do not disconnect/i
+                .test(lower),
+
+        claimed_authority:
+            /police|cbi|rbi|court|government|officer|cyber crime|cyber police|customs|income tax|department/i
+                .test(lower)
+    };
+}
+
+
+/* =========================================================
+   DOM READY
+   ========================================================= */
+
+document.addEventListener("DOMContentLoaded", function() {
+
+    console.log("=================================");
+    console.log("DIGITAL ARREST SHIELD STARTED");
+    console.log("=================================");
+
+
+    /* =====================================================
+       SCAM CHECKER
+       ===================================================== */
+
+    const questions =
+        document.querySelectorAll(".question");
+
+    const analyzeButton =
+        document.getElementById("analyzeBtn");
+
+    const resultBox =
+        document.getElementById("result");
+
+    console.log(
+        "Questions found:",
+        questions.length
+    );
+
+    console.log(
+        "Analyze button:",
+        analyzeButton
+    );
+
+    console.log(
+        "Result box:",
+        resultBox
     );
 
 
-optionButtons.forEach(function(button) {
+    /* =====================================================
+       QUESTION BUTTONS
+       ===================================================== */
 
-    button.addEventListener(
-        "click",
-        function() {
+    document
+        .querySelectorAll(".question .options button")
+        .forEach(function(button) {
 
-            const question =
-                button.closest(".question");
+            button.type = "button";
 
+            button.addEventListener(
+                "click",
+                function(event) {
 
-            question
-                .querySelectorAll("button")
-                .forEach(function(btn) {
+                    event.preventDefault();
+                    event.stopPropagation();
 
-                    btn.classList.remove(
-                        "selected"
+                    const parent =
+                        this.closest(".options");
+
+                    if (!parent) {
+                        return;
+                    }
+
+                    parent
+                        .querySelectorAll("button")
+                        .forEach(function(btn) {
+                            btn.classList.remove("selected");
+                        });
+
+                    this.classList.add("selected");
+
+                    console.log(
+                        "Selected:",
+                        this.dataset.value
                     );
-
-                });
-
-
-            button.classList.add(
-                "selected"
+                }
             );
-
-        }
-    );
-
-});
+        });
 
 
-const analyzeButton =
-    document.querySelector("#analyzeBtn");
+    /* =====================================================
+       ANALYZE INTERACTION
+       ===================================================== */
 
-const resultBox =
-    document.querySelector("#result");
+    if (analyzeButton && resultBox) {
 
+        analyzeButton.type = "button";
 
-if (analyzeButton) {
+        analyzeButton.addEventListener(
+            "click",
+            async function(event) {
 
-    analyzeButton.type = "button";
+                event.preventDefault();
+                event.stopPropagation();
 
-
-    analyzeButton.addEventListener(
-        "click",
-        async function() {
-
-            const questions =
-                document.querySelectorAll(
-                    ".question"
+                console.log(
+                    "ANALYZE BUTTON CLICKED"
                 );
 
+                showBox(
+                    resultBox,
+                    `
+                        <div>
+                            <h3>
+                                🔍 Analyzing Interaction...
+                            </h3>
 
-            const payload = {};
+                            <p>
+                                Please wait...
+                            </p>
+                        </div>
+                    `
+                );
 
-            let missing = false;
+                const payload = {};
 
-
-            questions.forEach(
-                function(question) {
+                questions.forEach(function(question) {
 
                     const key =
                         question.dataset.key;
 
+                    if (!key) {
+                        return;
+                    }
 
                     const selected =
                         question.querySelector(
-                            ".selected"
+                            ".options button.selected"
                         );
-
 
                     if (!selected) {
 
-                        missing = true;
+                        if (key === "caller_claim") {
+                            payload[key] = "";
+                        } else {
+                            payload[key] = false;
+                        }
 
                         return;
-
                     }
-
 
                     const value =
                         selected.dataset.value;
 
+                    if (key === "caller_claim") {
 
-                    if (
-                        key === "caller_claim"
-                    ) {
-
-                        payload[key] =
-                            value;
+                        payload[key] = value;
 
                     } else {
 
                         payload[key] =
-                            value === "true";
+                            boolValue(value);
 
                     }
-
-                }
-            );
-
-
-            if (missing) {
-
-                showBox(
-                    resultBox,
-
-                    `
-                    <h3>
-                        ⚠️ Please answer all questions
-                    </h3>
-
-                    <p>
-                        Complete all 8 questions
-                        before analyzing.
-                    </p>
-                    `
-                );
-
-                return;
-
-            }
-
-
-            showBox(
-                resultBox,
-
-                `
-                <h3>
-                    ⏳ Analyzing Interaction...
-                </h3>
-
-                <p>
-                    Connecting to FastAPI...
-                </p>
-                `
-            );
-
-
-            try {
-
-                const data =
-                    await sendToBackend(
-                        payload
-                    );
-
-
-                renderRiskResult(
-                    resultBox,
-                    data
-                );
-
-
-                resultBox.scrollIntoView({
-                    behavior: "smooth",
-                    block: "center"
                 });
 
-
-            }
-
-            catch (error) {
-
-                showBox(
-                    resultBox,
-
-                    `
-                    <h3>
-                        ❌ Backend Connection Failed
-                    </h3>
-
-                    <p>
-                        Make sure FastAPI is running at:
-                    </p>
-
-                    <strong>
-                        ${BACKEND_URL}
-                    </strong>
-
-                    <p>
-                        <strong>Error:</strong>
-                        ${escapeHTML(error.message)}
-                    </p>
-                    `
+                console.log(
+                    "CHECKER PAYLOAD:",
+                    payload
                 );
 
-            }
+                try {
 
-        }
-    );
+                    const data =
+                        await sendToBackend(payload);
 
-}
-
-
-// =====================================================
-// MESSAGE ANALYZER
-// =====================================================
-
-const messageInput =
-    document.querySelector(
-        "#messageInput"
-    );
-
-
-const analyzeMessageButton =
-    document.querySelector(
-        "#analyzeMessageBtn"
-    );
-
-
-const messageResult =
-    document.querySelector(
-        "#messageResult"
-    );
-
-
-function detectMessageIndicators(
-    message
-) {
-
-    const text =
-        message.toLowerCase();
-
-
-    const authority =
-        /cbi|police|cyber crime|rbi|court|customs|government officer|official/
-        .test(text);
-
-
-    const arrest =
-        /arrest|arrested|jail|warrant|criminal case|fir/
-        .test(text);
-
-
-    const money =
-        /money|payment|pay now|transfer|fine|penalty|upi/
-        .test(text);
-
-
-    const otp =
-        /otp|cvv|password|bank details|account number|upi pin/
-        .test(text);
-
-
-    const video =
-        /video call|video-call|stay on call|camera on/
-        .test(text);
-
-
-    const app =
-        /install app|download app|apk|application/
-        .test(text);
-
-
-    const urgency =
-        /urgent|immediately|right now|do not disconnect|within.*minute/
-        .test(text);
-
-
-    let callerClaim =
-        "Suspicious Message";
-
-
-    if (text.includes("cbi")) {
-
-        callerClaim =
-            "CBI Officer";
-
-    }
-
-    else if (
-        text.includes("police")
-    ) {
-
-        callerClaim =
-            "Police Officer";
-
-    }
-
-    else if (
-        text.includes("rbi")
-    ) {
-
-        callerClaim =
-            "RBI Official";
-
-    }
-
-    else if (
-        text.includes("court")
-    ) {
-
-        callerClaim =
-            "Court Official";
-
-    }
-
-
-    return {
-
-        caller_claim:
-            callerClaim,
-
-        claimed_authority:
-            authority,
-
-        threatened_arrest:
-            arrest,
-
-        demanded_money:
-            money,
-
-        asked_otp_bank:
-            otp,
-
-        forced_video_call:
-            video,
-
-        asked_install_app:
-            app,
-
-        created_urgency:
-            urgency
-
-    };
-
-}
-
-
-if (analyzeMessageButton) {
-
-    analyzeMessageButton.addEventListener(
-        "click",
-        async function() {
-
-            const message =
-                messageInput.value.trim();
-
-
-            if (!message) {
-
-                showBox(
-                    messageResult,
-
-                    `
-                    <h3>
-                        ⚠️ No message entered
-                    </h3>
-
-                    <p>
-                        Paste a suspicious
-                        WhatsApp/SMS message first.
-                    </p>
-                    `
-                );
-
-                return;
-
-            }
-
-
-            showBox(
-                messageResult,
-
-                `
-                <h3>
-                    ⏳ Analyzing Message...
-                </h3>
-
-                <p>
-                    Checking suspicious indicators...
-                </p>
-                `
-            );
-
-
-            try {
-
-                const payload =
-                    detectMessageIndicators(
-                        message
+                    console.log(
+                        "CHECKER RESPONSE:",
+                        data
                     );
 
-
-                const data =
-                    await sendToBackend(
-                        payload
+                    renderRiskResult(
+                        resultBox,
+                        data,
+                        "Caller claimed to be: " +
+                        (payload.caller_claim || "unknown")
                     );
 
-
-                renderRiskResult(
-                    messageResult,
-                    data
-                );
-
-            }
-
-            catch (error) {
-
-                showBox(
-                    messageResult,
-
-                    `
-                    <h3>
-                        ❌ Message Analysis Failed
-                    </h3>
-
-                    <p>
-                        ${escapeHTML(
-                            error.message
-                        )}
-                    </p>
-                    `
-                );
-
-            }
-
-        }
-    );
-
-}
-
-
-// =====================================================
-// SCREENSHOT ANALYZER
-// =====================================================
-
-const screenshotInput =
-    document.querySelector(
-        "#screenshotInput"
-    );
-
-
-const screenshotPreview =
-    document.querySelector(
-        "#screenshotPreview"
-    );
-
-
-const analyzeScreenshotButton =
-    document.querySelector(
-        "#analyzeScreenshotBtn"
-    );
-
-
-const screenshotResult =
-    document.querySelector(
-        "#screenshotResult"
-    );
-
-
-let selectedScreenshot = null;
-
-
-if (screenshotInput) {
-
-    screenshotInput.addEventListener(
-        "change",
-        function(event) {
-
-            const file =
-                event.target.files[0];
-
-
-            if (!file) {
-                return;
-            }
-
-
-            selectedScreenshot =
-                file;
-
-
-            const reader =
-                new FileReader();
-
-
-            reader.onload =
-                function(e) {
-
-                    screenshotPreview.innerHTML = `
-
-                        <img
-                            src="${e.target.result}"
-                            alt="Suspicious screenshot">
-
-                    `;
-
-                };
-
-
-            reader.readAsDataURL(file);
-
-        }
-    );
-
-}
-
-
-if (analyzeScreenshotButton) {
-
-    analyzeScreenshotButton.addEventListener(
-        "click",
-        async function() {
-
-            if (!selectedScreenshot) {
-
-                showBox(
-                    screenshotResult,
-
-                    `
-                    <h3>
-                        ⚠️ Upload a screenshot first
-                    </h3>
-
-                    <p>
-                        Select a WhatsApp, SMS
-                        or chat screenshot.
-                    </p>
-                    `
-                );
-
-                return;
-
-            }
-
-
-            if (
-                typeof Tesseract ===
-                "undefined"
-            ) {
-
-                showBox(
-                    screenshotResult,
-
-                    `
-                    <h3>
-                        ❌ OCR unavailable
-                    </h3>
-
-                    <p>
-                        Refresh the page and
-                        try again.
-                    </p>
-                    `
-                );
-
-                return;
-
-            }
-
-
-            showBox(
-                screenshotResult,
-
-                `
-                <h3>
-                    📸 Reading Screenshot...
-                </h3>
-
-                <p>
-                    OCR is extracting
-                    visible text.
-                </p>
-                `
-            );
-
-
-            try {
-
-                const result =
-                    await Tesseract.recognize(
-                        selectedScreenshot,
-                        "eng",
-                        {
-                            logger: function(info) {
-
-                                if (
-                                    info.status ===
-                                    "recognizing text"
-                                ) {
-
-                                    const percent =
-                                        Math.round(
-                                            (
-                                                info.progress ||
-                                                0
-                                            ) * 100
-                                        );
-
-
-                                    showBox(
-                                        screenshotResult,
-
-                                        `
-                                        <h3>
-                                            📸 Reading Screenshot...
-                                        </h3>
-
-                                        <p>
-                                            OCR Progress:
-                                            ${percent}%
-                                        </p>
-                                        `
-                                    );
-
-                                }
-
-                            }
-                        }
+                } catch (error) {
+
+                    console.error(
+                        "CHECKER ERROR:",
+                        error
                     );
-
-
-                const extractedText =
-                    result.data.text.trim();
-
-
-                if (!extractedText) {
 
                     showBox(
-                        screenshotResult,
-
+                        resultBox,
                         `
-                        <h3>
-                            ⚠️ No readable text found
-                        </h3>
+                            <div class="risk-medium">
 
-                        <p>
-                            Try a clearer screenshot.
-                        </p>
+                                <h2>
+                                    ⚠️ Analysis Error
+                                </h2>
+
+                                <p>
+                                    ${escapeHTML(error.message)}
+                                </p>
+
+                                <p>
+                                    Make sure FastAPI is running at:
+                                </p>
+
+                                <strong>
+                                    http://127.0.0.1:8000
+                                </strong>
+
+                            </div>
+                        `
+                    );
+                }
+            }
+        );
+    }
+
+
+    /* =====================================================
+       WHATSAPP / SMS ANALYZER
+       ===================================================== */
+
+    const messageInput =
+        document.getElementById("messageInput");
+
+    const analyzeMessageButton =
+        document.getElementById("analyzeMessageBtn");
+
+    const messageResult =
+        document.getElementById("messageResult");
+
+    console.log(
+        "Message analyzer:",
+        messageInput,
+        analyzeMessageButton,
+        messageResult
+    );
+
+    if (
+        analyzeMessageButton &&
+        messageInput &&
+        messageResult
+    ) {
+
+        analyzeMessageButton.type = "button";
+
+        analyzeMessageButton.addEventListener(
+            "click",
+            async function(event) {
+
+                event.preventDefault();
+                event.stopPropagation();
+
+                console.log(
+                    "MESSAGE ANALYZE CLICKED"
+                );
+
+                const message =
+                    messageInput.value.trim();
+
+                if (!message) {
+
+                    showBox(
+                        messageResult,
+                        `
+                            <div class="risk-medium">
+
+                                <h3>
+                                    ⚠️ Message Required
+                                </h3>
+
+                                <p>
+                                    Pehle WhatsApp/SMS message paste karo.
+                                </p>
+
+                            </div>
                         `
                     );
 
                     return;
-
                 }
 
+                showBox(
+                    messageResult,
+                    `
+                        <h3>
+                            🔍 Analyzing Message...
+                        </h3>
+
+                        <p>
+                            Please wait...
+                        </p>
+                    `
+                );
 
                 const payload =
-                    detectMessageIndicators(
-                        extractedText
+                    createTextPayload(message);
+
+                console.log(
+                    "MESSAGE PAYLOAD:",
+                    payload
+                );
+
+                try {
+
+                    const data =
+                        await sendToBackend(payload);
+
+                    console.log(
+                        "MESSAGE RESPONSE:",
+                        data
                     );
 
-
-                showBox(
-                    screenshotResult,
-
-                    `
-                    <h3>
-                        🔎 Text Extracted
-                    </h3>
-
-                    <div class="ocr-text">
-
-                        ${escapeHTML(
-                            extractedText
-                        )}
-
-                    </div>
-
-                    <p>
-                        Sending indicators
-                        to backend...
-                    </p>
-                    `
-                );
-
-
-                const data =
-                    await sendToBackend(
-                        payload
+                    renderRiskResult(
+                        messageResult,
+                        data,
+                        message
                     );
 
+                } catch (error) {
 
-                renderRiskResult(
-                    screenshotResult,
-                    data
-                );
+                    console.error(
+                        "MESSAGE ERROR:",
+                        error
+                    );
 
+                    showBox(
+                        messageResult,
+                        `
+                            <div class="risk-medium">
+
+                                <h3>
+                                    ⚠️ Message Analysis Failed
+                                </h3>
+
+                                <p>
+                                    ${escapeHTML(error.message)}
+                                </p>
+
+                            </div>
+                        `
+                    );
+                }
             }
+        );
 
-            catch (error) {
+    } else {
 
-                showBox(
-                    screenshotResult,
-
-                    `
-                    <h3>
-                        ❌ Screenshot Analysis Failed
-                    </h3>
-
-                    <p>
-                        ${escapeHTML(
-                            error.message
-                        )}
-                    </p>
-                    `
-                );
-
-            }
-
-        }
-    );
-
-}
+        console.error(
+            "MESSAGE ANALYZER ELEMENT MISSING"
+        );
+    }
 
 
-// =====================================================
-// VIDEO CALL SIMULATOR
-// =====================================================
+    /* =====================================================
+       SCREENSHOT
+       ===================================================== */
 
-const simConversation =
-    document.querySelector(
-        "#sim-conversation"
-    );
+    const screenshotInput =
+        document.getElementById("screenshotInput");
 
+    const screenshotPreview =
+        document.getElementById("screenshotPreview");
 
-const simOptions =
-    document.querySelector(
-        "#sim-options"
-    );
+    const analyzeScreenshotButton =
+        document.getElementById(
+            "analyzeScreenshotBtn"
+        );
 
-
-const simResult =
-    document.querySelector(
-        "#sim-result"
-    );
-
-
-const restartSimulator =
-    document.querySelector(
-        "#restart-simulator"
-    );
-
-
-function addSimulatorMessage(
-    text,
-    sender
-) {
-
-    const div =
-        document.createElement(
-            "div"
+    const screenshotResult =
+        document.getElementById(
+            "screenshotResult"
         );
 
 
-    div.className =
-        sender === "caller"
-            ? "sim-message caller-message"
-            : "sim-message user-message";
+    /* ================= PREVIEW ================= */
 
+    if (screenshotInput) {
 
-    div.innerHTML = `
+        screenshotInput.addEventListener(
+            "change",
+            function() {
 
-        <span class="sim-speaker">
+                const file =
+                    this.files &&
+                    this.files[0];
 
-            ${
-                sender === "caller"
-                    ? "Caller"
-                    : "You"
+                if (!file) {
+                    return;
+                }
+
+                const reader =
+                    new FileReader();
+
+                reader.onload =
+                    function(event) {
+
+                        if (!screenshotPreview) {
+                            return;
+                        }
+
+                        screenshotPreview.innerHTML = `
+                            <img
+                                src="${event.target.result}"
+                                alt="Screenshot Preview"
+                            >
+                        `;
+                    };
+
+                reader.readAsDataURL(file);
             }
-
-        </span>
-
-        <p>
-            ${escapeHTML(text)}
-        </p>
-
-    `;
+        );
+    }
 
 
-    simConversation.appendChild(
-        div
-    );
+    /* ================= SCREENSHOT ANALYSIS ================= */
 
+    if (
+        analyzeScreenshotButton &&
+        screenshotInput &&
+        screenshotResult
+    ) {
 
-    simConversation.scrollTop =
-        simConversation.scrollHeight;
+        analyzeScreenshotButton.type =
+            "button";
 
-}
+        analyzeScreenshotButton.addEventListener(
+            "click",
+            async function(event) {
 
+                event.preventDefault();
+                event.stopPropagation();
 
-function disableSimulatorOptions() {
+                const file =
+                    screenshotInput.files &&
+                    screenshotInput.files[0];
 
-    simOptions
-        .querySelectorAll("button")
-        .forEach(function(button) {
+                if (!file) {
 
-            button.disabled =
-                true;
+                    showBox(
+                        screenshotResult,
+                        `
+                            <div class="risk-medium">
 
-            button.style.opacity =
-                "0.5";
+                                <h3>
+                                    ⚠️ Screenshot Required
+                                </h3>
 
-        });
+                                <p>
+                                    Pehle screenshot select karo.
+                                </p>
 
-}
+                            </div>
+                        `
+                    );
 
+                    return;
+                }
 
-function showSimulatorResult(
-    title,
-    text
-) {
+                showBox(
+                    screenshotResult,
+                    `
+                        <h3>
+                            📸 Reading Screenshot...
+                        </h3>
 
-    showBox(
-        simResult,
-
-        `
-        <h3>
-            ${title}
-        </h3>
-
-        <p>
-            ${text}
-        </p>
-        `
-    );
-
-
-    disableSimulatorOptions();
-
-}
-
-
-function setSimulatorOptions(
-    options
-) {
-
-    simOptions.innerHTML = "";
-
-
-    options.forEach(
-        function(option) {
-
-            const button =
-                document.createElement(
-                    "button"
+                        <p>
+                            OCR text read kar raha hai...
+                        </p>
+                    `
                 );
 
+                try {
 
-            button.type =
-                "button";
+                    if (
+                        typeof Tesseract ===
+                        "undefined"
+                    ) {
 
+                        throw new Error(
+                            "Tesseract OCR load nahi hua."
+                        );
+                    }
+
+                    const ocrResult =
+                        await Tesseract.recognize(
+                            file,
+                            "eng",
+                            {
+                                logger: function(info) {
+
+                                    if (
+                                        info.status ===
+                                        "recognizing text"
+                                    ) {
+
+                                        const progress =
+                                            Math.round(
+                                                (info.progress || 0) *
+                                                100
+                                            );
+
+                                        showBox(
+                                            screenshotResult,
+                                            `
+                                                <h3>
+                                                    📸 Reading Screenshot...
+                                                </h3>
+
+                                                <p>
+                                                    OCR Progress:
+                                                    ${progress}%
+                                                </p>
+                                            `
+                                        );
+                                    }
+                                }
+                            }
+                        );
+
+                    const extractedText =
+                        ocrResult?.data?.text || "";
+
+                    if (!extractedText.trim()) {
+
+                        showBox(
+                            screenshotResult,
+                            `
+                                <div class="risk-medium">
+
+                                    <h3>
+                                        ⚠️ No Text Found
+                                    </h3>
+
+                                    <p>
+                                        Screenshot me readable text nahi mila.
+                                    </p>
+
+                                </div>
+                            `
+                        );
+
+                        return;
+                    }
+
+                    const payload =
+                        createTextPayload(
+                            extractedText
+                        );
+
+                    console.log(
+                        "SCREENSHOT PAYLOAD:",
+                        payload
+                    );
+
+                    const data =
+                        await sendToBackend(
+                            payload
+                        );
+
+                    const flags =
+                        Array.isArray(data.red_flags)
+                            ? data.red_flags
+                            : [];
+
+                    const actions =
+                        Array.isArray(data.safety_actions)
+                            ? data.safety_actions
+                            : [];
+
+                    showBox(
+                        screenshotResult,
+                        `
+                            <h3>
+                                📄 Extracted Text
+                            </h3>
+
+                            <div class="ocr-text">
+                                ${escapeHTML(extractedText)}
+                            </div>
+
+                            <hr style="
+                                margin:20px 0;
+                                border-color:#28465e;
+                            ">
+
+                            <h2>
+                                ${riskIcon(data.risk_level)}
+                                ${escapeHTML(
+                                    data.risk_level || "LOW"
+                                )}
+                                RISK
+                            </h2>
+
+                            <div class="score">
+                                ${escapeHTML(
+                                    data.risk_score ?? 0
+                                )}%
+                            </div>
+
+                            <p>
+                                <strong>
+                                    Scam Detected:
+                                </strong>
+
+                                ${
+                                    data.scam_detected
+                                        ? "Yes"
+                                        : "No"
+                                }
+                            </p>
+
+                            ${
+                                flags.length
+                                    ? `
+                                        <h3>
+                                            🚩 Red Flags
+                                        </h3>
+
+                                        <ul>
+                                            ${flags.map(function(flag) {
+                                                return `<li>${escapeHTML(flag)}</li>`;
+                                            }).join("")}
+                                        </ul>
+                                    `
+                                    : ""
+                            }
+
+                            ${
+                                actions.length
+                                    ? `
+                                        <h3>
+                                            🛡️ Safety Actions
+                                        </h3>
+
+                                        <ul>
+                                            ${actions.map(function(action) {
+                                                return `<li>${escapeHTML(action)}</li>`;
+                                            }).join("")}
+                                        </ul>
+                                    `
+                                    : ""
+                            }
+                        `
+                    );
+
+                    /*
+                       Screenshot ke extracted text ko AI ko bhejna.
+                    */
+
+                    loadAIAdvice(
+                        screenshotResult,
+                        data,
+                        extractedText
+                    );
+
+                } catch (error) {
+
+                    console.error(
+                        "SCREENSHOT ERROR:",
+                        error
+                    );
+
+                    showBox(
+                        screenshotResult,
+                        `
+                            <div class="risk-medium">
+
+                                <h3>
+                                    ⚠️ Screenshot Analysis Failed
+                                </h3>
+
+                                <p>
+                                    ${escapeHTML(error.message)}
+                                </p>
+
+                            </div>
+                        `
+                    );
+                }
+            }
+        );
+    }
+
+
+    /* =====================================================
+       VIDEO CALL SIMULATOR
+       ===================================================== */
+
+    const simConversation =
+        document.getElementById(
+            "sim-conversation"
+        );
+
+    const simOptions =
+        document.getElementById(
+            "sim-options"
+        );
+
+    const simResult =
+        document.getElementById(
+            "sim-result"
+        );
+
+    const restartSimulator =
+        document.getElementById(
+            "restart-simulator"
+        );
+
+
+    const simulatorData = [
+
+        {
+            caller:
+                "Hello. I am calling from the Cyber Crime Department.",
+
+            options: [
+
+                {
+                    text:
+                        "Okay, please tell me what happened.",
+
+                    response:
+                        "The caller says there is a serious case against you.",
+
+                    risk:
+                        false
+                },
+
+                {
+                    text:
+                        "I will verify your identity first.",
+
+                    response:
+                        "The caller becomes urgent and pressures you.",
+
+                    risk:
+                        true
+                }
+            ]
+        },
+
+        {
+            caller:
+                "Your details are linked to an illegal case. You may be arrested.",
+
+            options: [
+
+                {
+                    text:
+                        "I will visit the police station directly.",
+
+                    response:
+                        "The caller tries to stop independent verification.",
+
+                    risk:
+                        true
+                },
+
+                {
+                    text:
+                        "I will share my OTP to clear the case.",
+
+                    response:
+                        "Never share OTPs or banking information.",
+
+                    risk:
+                        true
+                }
+            ]
+        },
+
+        {
+            caller:
+                "Stay on the video call and transfer the required amount immediately.",
+
+            options: [
+
+                {
+                    text:
+                        "I will transfer the money.",
+
+                    response:
+                        "This is a major warning sign.",
+
+                    risk:
+                        true
+                },
+
+                {
+                    text:
+                        "I will end the call and verify independently.",
+
+                    response:
+                        "Good safety practice.",
+
+                    risk:
+                        false
+                }
+            ]
+        }
+
+    ];
+
+
+    let simulatorStep = 0;
+
+
+    function addSimulatorMessage(
+        speaker,
+        message,
+        className
+    ) {
+
+        if (!simConversation) {
+            return;
+        }
+
+        const div =
+            document.createElement("div");
+
+        div.className =
+            `sim-message ${className}`;
+
+        div.innerHTML = `
+            <div class="sim-speaker">
+                ${escapeHTML(speaker)}
+            </div>
+
+            <div>
+                ${escapeHTML(message)}
+            </div>
+        `;
+
+        simConversation.appendChild(div);
+
+        simConversation.scrollTop =
+            simConversation.scrollHeight;
+    }
+
+
+    function loadSimulator() {
+
+        if (!simOptions) {
+            return;
+        }
+
+        simOptions.innerHTML = "";
+
+        if (
+            simulatorStep >=
+            simulatorData.length
+        ) {
+
+            showBox(
+                simResult,
+                `
+                    <h3>
+                        🛡️ Simulation Complete
+                    </h3>
+
+                    <p>
+                        Verify independently and never
+                        share OTPs, banking information,
+                        or transfer money because of pressure.
+                    </p>
+                `
+            );
+
+            return;
+        }
+
+        const step =
+            simulatorData[simulatorStep];
+
+        addSimulatorMessage(
+            "Caller",
+            step.caller,
+            "caller-message"
+        );
+
+        step.options.forEach(function(option) {
+
+            const button =
+                document.createElement("button");
+
+            button.type = "button";
 
             button.className =
                 "sim-choice";
 
-
             button.textContent =
                 option.text;
 
-
             button.addEventListener(
                 "click",
-                function() {
+                function(event) {
 
-                    handleSimulatorChoice(
-                        option.action
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    addSimulatorMessage(
+                        "You",
+                        option.text,
+                        "user-message"
                     );
 
+                    addSimulatorMessage(
+                        "Caller",
+                        option.response,
+                        "caller-message"
+                    );
+
+                    if (option.risk) {
+
+                        showBox(
+                            simResult,
+                            `
+                                <h3>
+                                    🚨 Suspicious Behaviour
+                                </h3>
+
+                                <p>
+                                    This interaction contains
+                                    a scam warning sign.
+                                </p>
+                            `
+                        );
+                    }
+
+                    simulatorStep++;
+
+                    loadSimulator();
                 }
             );
 
-
-            simOptions.appendChild(
-                button
-            );
-
-        }
-    );
-
-}
-
-
-function handleSimulatorChoice(
-    choice
-) {
-
-
-    if (choice === "continue") {
-
-        addSimulatorMessage(
-            "I will continue the call.",
-            "user"
-        );
-
-
-        addSimulatorMessage(
-            "Do not disconnect. Your identity has been linked to a criminal case. You must cooperate immediately.",
-            "caller"
-        );
-
-
-        setSimulatorOptions([
-
-            {
-                text:
-                    "Continue",
-
-                action:
-                    "continue2"
-            },
-
-            {
-                text:
-                    "Ask for official verification",
-
-                action:
-                    "verify"
-            },
-
-            {
-                text:
-                    "End the call",
-
-                action:
-                    "end"
-            }
-
-        ]);
-
-
-        return;
-
-    }
-
-
-    if (choice === "continue2") {
-
-        addSimulatorMessage(
-            "I will continue listening.",
-            "user"
-        );
-
-
-        addSimulatorMessage(
-            "Stay on this video call and provide your bank details and OTP for verification.",
-            "caller"
-        );
-
-
-        setSimulatorOptions([
-
-            {
-                text:
-                    "Share information",
-
-                action:
-                    "share"
-            },
-
-            {
-                text:
-                    "Verify independently",
-
-                action:
-                    "verify"
-            },
-
-            {
-                text:
-                    "End the call",
-
-                action:
-                    "end"
-            }
-
-        ]);
-
-
-        return;
-
-    }
-
-
-    if (choice === "verify") {
-
-        addSimulatorMessage(
-            "I will verify the caller independently.",
-            "user"
-        );
-
-
-        showSimulatorResult(
-            "🛡️ Safer Response",
-
-            "Do not rely on contact information supplied by the caller. Verify the claim using an independently found official channel."
-        );
-
-
-        return;
-
-    }
-
-
-    if (choice === "end") {
-
-        addSimulatorMessage(
-            "I am ending the suspicious call.",
-            "user"
-        );
-
-
-        showSimulatorResult(
-            "✅ Safer Response",
-
-            "Ending the suspicious interaction prevents continued pressure. Verify the claim independently before taking action."
-        );
-
-
-        return;
-
-    }
-
-
-    if (choice === "share") {
-
-        addSimulatorMessage(
-            "I will share the requested information.",
-            "user"
-        );
-
-
-        showSimulatorResult(
-            "🚨 High-Risk Situation",
-
-            "Never share OTPs, passwords or banking credentials because a caller demands them."
-        );
-
-    }
-
-}
-
-
-// Initial simulator buttons
-
-if (simOptions) {
-
-    simOptions
-        .querySelectorAll("button")
-        .forEach(function(button) {
-
-            button.addEventListener(
-                "click",
-                function() {
-
-                    handleSimulatorChoice(
-                        button.dataset.choice
-                    );
-
-                }
-            );
-
+            simOptions.appendChild(button);
         });
-
-}
-
-
-// Restart simulator
-
-if (restartSimulator) {
-
-    restartSimulator.addEventListener(
-        "click",
-        function() {
-
-            simConversation.innerHTML = `
-
-                <div class="sim-message caller-message">
-
-                    <span class="sim-speaker">
-                        Caller
-                    </span>
-
-                    <p>
-                        I am calling from the Cyber Crime
-                        Department. Your identity has been
-                        linked to a serious case.
-                    </p>
-
-                </div>
-
-            `;
+    }
 
 
-            simResult.style.display =
-                "none";
+    if (restartSimulator) {
 
+        restartSimulator.type = "button";
 
-            simResult.innerHTML =
-                "";
+        restartSimulator.addEventListener(
+            "click",
+            function(event) {
 
+                event.preventDefault();
+                event.stopPropagation();
 
-            setSimulatorOptions([
+                simulatorStep = 0;
 
-                {
-                    text:
-                        "Continue the call",
-
-                    action:
-                        "continue"
-                },
-
-                {
-                    text:
-                        "Ask for official verification",
-
-                    action:
-                        "verify"
-                },
-
-                {
-                    text:
-                        "End the call",
-
-                    action:
-                        "end"
+                if (simConversation) {
+                    simConversation.innerHTML = "";
                 }
 
-            ]);
+                if (simResult) {
+                    simResult.innerHTML = "";
+                    simResult.style.display = "none";
+                }
 
-        }
+                loadSimulator();
+            }
+        );
+    }
+
+
+    if (
+        simConversation &&
+        simOptions
+    ) {
+        loadSimulator();
+    }
+
+
+    console.log(
+        "All Digital Arrest Shield features initialized."
     );
 
-}
-
-      
+});
