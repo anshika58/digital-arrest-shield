@@ -3,7 +3,7 @@
    FINAL SCRIPT.JS
    ========================================================= */
 
-const BACKEND_URL = "http://127.0.0.1:8000";
+ const BACKEND_URL = "https://digital-arrest-shield-1.onrender.com";;
 
 
 /* =========================================================
@@ -669,7 +669,7 @@ document.addEventListener("DOMContentLoaded", function() {
                                 </p>
 
                                 <strong>
-                                    http://127.0.0.1:8000
+                                    "https://digital-arrest-shield-1.onrender.com"
                                 </strong>
 
                             </div>
